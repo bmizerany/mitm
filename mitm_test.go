@@ -8,37 +8,23 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path"
 	"strings"
 	"testing"
 )
 
-var (
-	hostname, _ = os.Hostname()
-
-	dir      = path.Join(os.Getenv("HOME"), ".mitm")
-	keyFile  = path.Join(dir, "ca-key.pem")
-	certFile = path.Join(dir, "ca-cert.pem")
-)
-
-func loadCA() (cert tls.Certificate, err error) {
-	// TODO(kr): check file permissions
-	cert, err = tls.LoadX509KeyPair(certFile, keyFile)
-	if os.IsNotExist(err) {
-		cert, err = genCA()
-	}
-	if err == nil {
-		cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
-	}
-	return
-}
+var hostname, _ = os.Hostname()
 
 func genCA() (cert tls.Certificate, err error) {
 	certPEM, keyPEM, err := GenCA(hostname)
 	if err != nil {
-		return
+		return tls.Certificate{}, err
 	}
-	return tls.X509KeyPair(certPEM, keyPEM)
+	cert, err = tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
+	return cert, err
 }
 
 func testProxy(t *testing.T, ca *tls.Certificate, setupReq func(req *http.Request), wrap func(http.Handler) http.Handler, downstream http.HandlerFunc, checkResp func(*http.Response)) {
@@ -101,7 +87,7 @@ func testProxy(t *testing.T, ca *tls.Certificate, setupReq func(req *http.Reques
 func Test(t *testing.T) {
 	const xHops = "X-Hops"
 
-	ca, err := loadCA()
+	ca, err := genCA()
 	if err != nil {
 		t.Fatal("loadCA:", err)
 	}
