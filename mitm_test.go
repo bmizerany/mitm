@@ -3,7 +3,6 @@ package mitm
 import (
 	"crypto/tls"
 	"crypto/x509"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -35,54 +34,26 @@ func loadCA() (cert tls.Certificate, err error) {
 }
 
 func genCA() (cert tls.Certificate, err error) {
-	err = os.MkdirAll(dir, 0700)
-	if err != nil {
-		return
-	}
 	certPEM, keyPEM, err := GenCA(hostname)
 	if err != nil {
 		return
 	}
-	cert, _ = tls.X509KeyPair(certPEM, keyPEM)
-	err = ioutil.WriteFile(certFile, certPEM, 0400)
-	if err == nil {
-		err = ioutil.WriteFile(keyFile, keyPEM, 0400)
-	}
-	return cert, err
+	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
-func Test(t *testing.T) {
-	const xHops = "X-Hops"
-
-	ds := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		println("boom")
-		hops := r.Header.Get(xHops) + "c"
-		w.Header().Set(xHops, hops)
-	}))
+func testProxy(t *testing.T, ca *tls.Certificate, setupReq func(req *http.Request), wrap func(http.Handler) http.Handler, downstream http.HandlerFunc, checkResp func(*http.Response)) {
+	ds := httptest.NewTLSServer(downstream)
 	defer ds.Close()
 
-	wr := func(upstream http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			println("WRAP")
-			hops := r.Header.Get("X-Hops") + "b"
-			r.Header.Set("X-Hops", hops)
-			upstream.ServeHTTP(w, r)
-		})
-	}
-
-	ca, err := loadCA()
-	if err != nil {
-		t.Fatal("loadCA:", err)
-	}
 	p := &Proxy{
-		CA: &ca,
+		CA: ca,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
 		TLSServerConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
-		Wrap: wr,
+		Wrap: wrap,
 	}
 
 	l, err := net.Listen("tcp", "localhost:0")
@@ -104,7 +75,7 @@ func Test(t *testing.T) {
 	if err != nil {
 		t.Fatal("NewRequest:", err)
 	}
-	req.Header.Set(xHops, "a")
+	setupReq(req)
 
 	c := &http.Client{
 		Transport: &http.Transport{
@@ -124,7 +95,33 @@ func Test(t *testing.T) {
 	if err != nil {
 		t.Fatal("Do:", err)
 	}
-	if g := resp.Header.Get(xHops); g != "abc" {
-		t.Errorf("want X-Hops abc, got %s", g)
+	checkResp(resp)
+}
+
+func Test(t *testing.T) {
+	const xHops = "X-Hops"
+
+	ca, err := loadCA()
+	if err != nil {
+		t.Fatal("loadCA:", err)
 	}
+
+	testProxy(t, &ca, func(req *http.Request) {
+		req.Header.Set(xHops, "a")
+	}, func(upstream http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			println("WRAP")
+			hops := r.Header.Get("X-Hops") + "b"
+			r.Header.Set("X-Hops", hops)
+			upstream.ServeHTTP(w, r)
+		})
+	}, func(w http.ResponseWriter, r *http.Request) {
+		hops := r.Header.Get(xHops) + "c"
+		w.Header().Set(xHops, hops)
+	}, func(resp *http.Response) {
+		const w = "abc"
+		if g := resp.Header.Get(xHops); g != w {
+			t.Errorf("want %s to be %s, got %s", xHops, w, g)
+		}
+	})
 }
